@@ -37,8 +37,7 @@ class MyDataset(Data.Dataset):
 
     def __getitem__(self,index):
         in_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.485,0.456,0.406),(0.229,0.224,0.225))
+        transforms.ToTensor()
         ])
         
         A_path = self.A_paths[index%self.A_size]
@@ -52,16 +51,16 @@ class MyDataset(Data.Dataset):
     def __len__(self):
         return max(self.A_size,self.B_size)
 
-def get_dataloader(dir1,dir2,max_size=100):
+def get_dataloader(dir1,dir2,max_size,batch_size):
     dataset = MyDataset(dir1,dir2,max_size)
     loader = Data.DataLoader(
         dataset=dataset,
-        batch_size=10,
+        batch_size=batch_size,
         shuffle=True
     )
     return loader
 if __name__ == '__main__':
-    loader = get_dataloader('./horse2zebra/trainA/','./images/')
+    loader = get_dataloader('./horse2zebra/trainA/','./horse2zebra/trainB/',100,10)
     for step,(real_A,real_B) in enumerate(loader):
         print('Epoch: ', 0, '| Step: ', step, '| real_A: ',
               real_A.size(),'| real_B',real_B.size())

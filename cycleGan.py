@@ -6,6 +6,7 @@ import itertools
 import os
 import numpy as np
 from PIL import Image
+from torchvision import transforms
 
 class CycleGan(nn.Module):
     def __init__(self,opt):
@@ -25,20 +26,22 @@ class CycleGan(nn.Module):
             self.D_A = networks.Discriminator(opt.in_fc,opt.filter_num)
             self.D_B = networks.Discriminator(opt.in_fc,opt.filter_num)
             #loss
-            self.gan_loss = networks.GANLoss(opt.gan_mode)
+            self.gan_loss = networks.GANLoss(opt.gan_mode).to(self.device)
             self.cycle_loss = nn.L1Loss()
             #optimizer
-            self.optimizer_G = torch.optim.Adam(itertools.chain(self.G_A.parameters(),self.G_B.parameters()),lr=opt.lr)
-            self.optimizer_D = torch.optim.Adam(itertools.chain(self.D_A.parameters(),self.D_B.parameters()),lr=opt.lr)
-        
+            self.optimizer_G = torch.optim.Adam(itertools.chain(self.G_A.parameters(),self.G_B.parameters()),lr=opt.lr,betas=(0.5,0.999))
+            self.optimizer_D = torch.optim.Adam(itertools.chain(self.D_A.parameters(),self.D_B.parameters()),lr=opt.lr,betas=(0.5,0.999))
+            #self.optimizers = [self.optimizer_G,self.optimizer_D]
+            #lr
+            #self.schedulers = [networks.get_scheduler(optimizer, opt) for optimizer in self.optimizers]
     
     def forward(self,real_A,real_B):
         self.real_A = real_A
         self.real_B = real_B
-        self.fake_B = self.G_A(real_A)
-        self.cycle_A = self.G_B(self.fake_B)
-        self.fake_A = self.G_B(real_B)
-        self.cycle_B = self.G_A(self.fake_A)
+        self.fake_B = self.G_A(real_A).to(self.device)
+        self.cycle_A = self.G_B(self.fake_B).to(self.device)
+        self.fake_A = self.G_B(real_B).to(self.device)
+        self.cycle_B = self.G_A(self.fake_A).to(self.device)
     
     def backward_D_base(self,netD,real,fake):
         pred_real = netD(real)
@@ -46,14 +49,14 @@ class CycleGan(nn.Module):
         pred_fake = netD(fake)
         loss_fake = self.gan_loss(pred_fake,False)
         loss_D = (loss_real+loss_fake)/2
+        loss_D.backward()
         return loss_D
 
     def backward_D(self):
         '''GAN loss for discriminator A and B'''
         self.loss_D_A = self.backward_D_base(self.D_A,self.real_B,self.fake_B)
         self.loss_D_B = self.backward_D_base(self.D_B,self.real_A,self.fake_A)
-        self.loss_D = (self.loss_D_A+self.D_B)/2
-        self.loss_D.backward()
+        #self.loss_D = (self.loss_D_A+self.loss_D_B)/2
 
     def backward_G(self):
         '''gan loss and cycle loss for generator A and B'''
@@ -67,7 +70,7 @@ class CycleGan(nn.Module):
         self.cycle_loss_B = self.cycle_loss(self.fake_B,self.real_B)*lambda_B
 
         self.loss_G = (self.loss_G_A+self.loss_G_B+self.cycle_loss_A+self.cycle_loss_B)/4
-        self.loss_G.backward()
+        self.loss_G.backward(retain_graph=True)
     
     def optimize_parameters(self):
         '''calculate loss and update network weights'''
@@ -78,12 +81,12 @@ class CycleGan(nn.Module):
         self.optimizer_G.step()
 
         #fix generator and update discriminator
-        self.set_requires_grad([self.G_A,self.G_A],False)
+        self.set_requires_grad([self.D_A,self.D_B],True)
         self.optimizer_D.zero_grad()
         self.backward_D()
         self.optimizer_D.step()
 
-    def set_requires_grad(self, nets, requires_grad=False):
+    def set_requires_grad(self, nets, requires_grad):
         if not isinstance(nets, list):
             nets = [nets]
         for net in nets:
@@ -91,50 +94,67 @@ class CycleGan(nn.Module):
                 for param in net.parameters():
                     param.requires_grad = requires_grad
 
-    def save_parameters(self,epoch):
+    def save_parameters(self):
         if not os.path.isdir(self.opt.save_dir):
             os.mkdir(self.opt.save_dir)
         for name in self.model_name:
-            filename = '%s_%s.pth'%(epoch,name)
+            filename = '%s.pth'%name
             save_path = os.path.join(self.opt.save_dir,filename)
             net = getattr(self,name)
             torch.save(net.state_dict(),save_path)
     
-    def save_mid_result(self):
+    def save_mid_result(self,epoch):
         if not os.path.isdir(self.opt.save_mid_res):
             os.mkdir(self.opt.save_mid_res)
-        save_size = min(5,len(self.fake_A))
+        save_size = len(self.fake_A)
+        unloader = transforms.ToPILImage()
         for i in range(save_size):
-            filename_A = 'fakeA_%d.png'%save_size
-            filename_B = 'fakeB_&d,png'%save_size
+            filename_A = 'epoch%d_fakeA_%d.png'%(epoch,save_size)
+            filename_B = 'epoch%d_fakeB_%d.png'%(epoch,save_size)
             save_pathA = os.path.join(self.opt.save_mid_res,filename_A)
             save_pathB = os.path.join(self.opt.save_mid_res,filename_B)
-            imgA = self.tensor2im(self.fake_A[i])
-            imgB = self.tensor2im(self.fake_B[i])
-            imA = Image.fromarray(imgA)
-            imB = Image.fromarray(imgB)
+
+            imA = self.fake_A.cpu().clone()
+            imB = self.fake_B.cpu().clone()
+            imA = unloader(imA[0])
+            imB = unloader(imB[0])
             imA.save(save_pathA)
             imB.save(save_pathB)
 
     def get_loss(self):
-        return self.loss_D,self.loss_G
+        return self.loss_D_A,self.loss_D_B,self.loss_G
 
-    def tensor2im(self,input_image, imtype=np.uint8):
-        """"Converts a Tensor array into a numpy image array.
+    
+    def load_networks(self):
+        """Load all the networks from the disk.
 
         Parameters:
-            input_image (tensor) --  the input image tensor array
-            imtype (type)        --  the desired type of the converted numpy array
+            epoch (int) -- current epoch; used in the file name '%s_net_%s.pth' % (epoch, name)
         """
-        if not isinstance(input_image, np.ndarray):
-            if isinstance(input_image, torch.Tensor):  # get the data from a variable
-                image_tensor = input_image.data
-            else:
-                return input_image
-            image_numpy = image_tensor[0].cpu().float().numpy()  # convert it into a numpy array
-            if image_numpy.shape[0] == 1:  # grayscale to RGB
-                image_numpy = np.tile(image_numpy, (3, 1, 1))
-            image_numpy = (np.transpose(image_numpy, (1, 2, 0)) + 1) / 2.0 * 255.0  # post-processing: tranpose and scaling
-        else:  # if it is a numpy array, do nothing
-            image_numpy = input_image
-        return image_numpy.astype(imtype)
+        d = os.listdir(self.opt.save_dir)
+        if len(d) == 0 or '%s.pth'%self.model_name[0] not in d:
+            print("There are not any previous parameters being loaded.")
+            return
+        
+        for name in self.model_name:
+            load_filename = '%s.pth' % name
+            if isinstance(name, str) :
+                
+                load_path = os.path.join(self.opt.save_dir, load_filename)
+                net = getattr(self, name)
+
+                print('loading the model from %s' % load_path)
+
+                state_dict = torch.load(load_path, map_location=str(self.device))
+                net.load_state_dict(state_dict)
+
+    # def update_learning_rate(self):
+    #     """Update learning rates for all the networks; called at the end of every epoch"""
+    #     for scheduler in self.schedulers:
+    #         if self.opt.lr_policy == 'plateau':
+    #             scheduler.step(self.metric)
+    #         else:
+    #             scheduler.step()
+
+    #     lr = self.optimizers[0].param_groups[0]['lr']
+    #     print('learning rate = %.7f' % lr)
